@@ -99,6 +99,18 @@
             let index = 0;
             let expectingResponse = false;
 
+            // Counters for summary
+            let totalRequests = 0;
+            let validRequests = 0;
+            let invalidRequests = 0;
+
+            let totalResponses = 0;
+            let validResponses = 0;
+            let invalidResponses = 0;
+
+            // Data for Read Holding Registers requests
+            const readHoldingRegistersRequests = [];
+
             while (index < cleanedInput.length) {
                 const modbusFrame = decodeModbus(cleanedInput, index, expectingResponse);
                 if (modbusFrame.error) {
@@ -108,18 +120,129 @@
                 frames.push(modbusFrame);
                 index += modbusFrame.totalBits;
 
+                // Update counters and data based on frame type
+                if (modbusFrame.type === 'request') {
+                    totalRequests++;
+                    if (modbusFrame.crcMatch) {
+                        validRequests++;
+                    } else {
+                        invalidRequests++;
+                    }
+                    // Check if it's a Read Holding Registers request and collect data
+                    if (modbusFrame.functionCode === 0x03 && modbusFrame.crcMatch) {
+                        const startingAddress = (modbusFrame.data[0] << 8) | modbusFrame.data[1];
+                        const quantity = (modbusFrame.data[2] << 8) | modbusFrame.data[3];
+                        readHoldingRegistersRequests.push({ startingAddress, quantity });
+                    }
+                } else if (modbusFrame.type === 'response') {
+                    totalResponses++;
+                    if (modbusFrame.crcMatch) {
+                        validResponses++;
+                    } else {
+                        invalidResponses++;
+                    }
+                }
+
                 // Toggle expectingResponse based on the frame type
                 expectingResponse = modbusFrame.type === 'request';
             }
 
-            // Pair requests and responses
+            // Build the summary as a table
+            let summaryHTML = `
+                <h3>Summary</h3>
+                <table class="table table-bordered">
+                    <tbody>
+                        <tr>
+                            <td>Total Requests</td>
+                            <td>${totalRequests}</td>
+                        </tr>
+                        <tr>
+                            <td>Valid Requests (CRC OK)</td>
+                            <td>${validRequests}</td>
+                        </tr>
+                        <tr>
+                            <td>Invalid Requests (CRC Failed)</td>
+                            <td>${invalidRequests}</td>
+                        </tr>
+                        <tr>
+                            <td>Total Responses</td>
+                            <td>${totalResponses}</td>
+                        </tr>
+                        <tr>
+                            <td>Valid Responses (CRC OK)</td>
+                            <td>${validResponses}</td>
+                        </tr>
+                        <tr>
+                            <td>Invalid Responses (CRC Failed)</td>
+                            <td>${invalidResponses}</td>
+                        </tr>
+                    </tbody>
+                </table>
+            `;
+
+            // Build the table of Read Holding Registers requests
+            // Tally the requests by starting address and quantity
+            const requestCounts = {};
+            readHoldingRegistersRequests.forEach(req => {
+                const key = `${req.startingAddress}-${req.quantity}`;
+                if (requestCounts[key]) {
+                    requestCounts[key].count++;
+                } else {
+                    requestCounts[key] = {
+                        startingAddress: req.startingAddress,
+                        quantity: req.quantity,
+                        count: 1
+                    };
+                }
+            });
+
+            let requestTableHTML = '';
+            if (Object.keys(requestCounts).length > 0) {
+                requestTableHTML = `
+                    <h3>Read Holding Registers Requests</h3>
+                    <table class="table table-bordered">
+                        <thead>
+                            <tr>
+                                <th>Starting Address (Hex)</th>
+                                <th>Quantity</th>
+                                <th>Count</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                `;
+                for (const key in requestCounts) {
+                    const req = requestCounts[key];
+                    const startingAddressHex = '0x' + req.startingAddress.toString(16).toUpperCase().padStart(4, '0');
+                    requestTableHTML += `
+                        <tr>
+                            <td>${startingAddressHex}</td>
+                            <td>${req.quantity}</td>
+                            <td>${req.count}</td>
+                        </tr>
+                    `;
+                }
+                requestTableHTML += `
+                        </tbody>
+                    </table>
+                `;
+            }
+
+            // Insert the summary and request table at the top of the output
+            outputDiv.innerHTML = summaryHTML + requestTableHTML;
+
+            // Now, output the frames with numbering
+            let requestNumber = 0;
+            let responseNumber = 0;
+
             for (let i = 0; i < frames.length; i++) {
                 const frame = frames[i];
                 if (frame.type === 'request') {
+                    requestNumber++;
                     const requestFrame = frame;
                     const responseFrame = frames[i + 1]?.type === 'response' ? frames[i + 1] : null;
                     if (responseFrame) {
                         i++; // Skip the response frame in the next iteration
+                        responseNumber++;
                     }
 
                     const requestHex = formatModbusFrame(requestFrame);
@@ -136,12 +259,12 @@
                         <div class="card">
                             <div class="card-body">
                                 <div class="request">
-                                    <h5>Request Breakdown</h5>
+                                    <h5>Request ${requestNumber} Breakdown</h5>
                                     <pre>${requestHex}</pre>
                                     ${requestBreakdown}
                                 </div>
                                 <div class="response">
-                                    <h5>Response Breakdown</h5>
+                                    <h5>Response ${responseNumber} Breakdown</h5>
                                     <pre>${responseHex}</pre>
                                     ${responseBreakdown}
                                 </div>
@@ -271,9 +394,10 @@
             if (frame.type === 'request') {
                 const startingAddress = (frame.data[0] << 8) | frame.data[1];
                 const quantity = (frame.data[2] << 8) | frame.data[3];
+                const startingAddressHex = '0x' + startingAddress.toString(16).toUpperCase().padStart(4, '0');
                 dataDescription = `
                     <tr>
-                        <td>0x${(frame.data[0].toString(16).toUpperCase().padStart(2, '0'))}${(frame.data[1].toString(16).toUpperCase().padStart(2, '0'))}</td>
+                        <td>${startingAddressHex}</td>
                         <td>Starting Address (Dec: ${startingAddress})</td>
                     </tr>
                     <tr>
