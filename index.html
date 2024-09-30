@@ -1,0 +1,418 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Modbus Capture Viewer</title>
+    <!-- Bootstrap CSS from cdnjs -->
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/bootstrap/5.3.0/css/bootstrap.min.css" rel="stylesheet">
+    <style>
+        body {
+            margin: 20px;
+            background-color: #f4f4f4;
+        }
+        h1 {
+            color: #333;
+        }
+        textarea {
+            width: 100%;
+            height: 150px;
+            margin-bottom: 20px;
+        }
+        .warning {
+            color: red;
+        }
+        .card {
+            margin-bottom: 20px;
+        }
+        .card-body {
+            display: flex;
+            flex-wrap: wrap;
+        }
+        .request, .response {
+            flex: 1;
+            min-width: 300px;
+            margin: 10px;
+        }
+        .request h5, .response h5 {
+            text-align: center;
+        }
+        .nested-table th, .nested-table td {
+            padding: 5px;
+            text-align: center;
+        }
+        .nested-table {
+            width: 100%;
+            margin-top: 10px;
+        }
+        /* Additional styles */
+        .ascii-display {
+            font-family: monospace;
+            font-size: 16px;
+            white-space: pre;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1 class="my-4">Modbus Capture Viewer</h1>
+        <textarea id="binaryInput" placeholder="Paste binary strings (1s and 0s) here...">
+000000010000001100000000100010000000000000001010010001011110011100000001000000110001010001000010101001110000010011011101010000111011101110011010000110110100000000000111100000000101101010111110011000110001011010001110110000100011011010111110010001111011111010111100
+        </textarea>
+        <button class="btn btn-primary" onclick="processInput()">Process Input</button>
+        <h2 class="mt-4">Output</h2>
+        <div id="output"></div>
+    </div>
+
+    <!-- Modals -->
+    <div class="modal fade" id="transposeModal" tabindex="-1" aria-labelledby="transposeModalLabel" aria-hidden="true">
+      <div class="modal-dialog modal-dialog-scrollable modal-lg">
+        <div class="modal-content">
+          <div class="modal-header">
+            <h5 class="modal-title" id="transposeModalLabel">ASCII Representation</h5>
+            <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+          </div>
+          <div class="modal-body" id="modalBodyContent">
+            <!-- ASCII content will be inserted here -->
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- jQuery from cdnjs -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jquery/3.6.0/jquery.min.js"></script>
+    <!-- Bootstrap JS from cdnjs -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/bootstrap/5.3.0/js/bootstrap.bundle.min.js"></script>
+    
+    <script>
+        function processInput() {
+            const input = document.getElementById('binaryInput').value.trim();
+            const outputDiv = document.getElementById('output');
+            outputDiv.innerHTML = '';
+
+            if (!input) {
+                outputDiv.innerHTML = '<p class="text-danger">Please enter some binary data.</p>';
+                return;
+            }
+
+            const cleanedInput = input.replace(/\s+/g, '');
+            const frames = [];
+            let index = 0;
+            let expectingResponse = false;
+
+            while (index < cleanedInput.length) {
+                const modbusFrame = decodeModbus(cleanedInput, index, expectingResponse);
+                if (modbusFrame.error) {
+                    outputDiv.innerHTML += `<p class="text-danger">${modbusFrame.error}</p>`;
+                    break;
+                }
+                frames.push(modbusFrame);
+                index += modbusFrame.totalBits;
+
+                // Toggle expectingResponse based on the frame type
+                expectingResponse = modbusFrame.type === 'request';
+            }
+
+            // Pair requests and responses
+            for (let i = 0; i < frames.length; i++) {
+                const frame = frames[i];
+                if (frame.type === 'request') {
+                    const requestFrame = frame;
+                    const responseFrame = frames[i + 1]?.type === 'response' ? frames[i + 1] : null;
+                    if (responseFrame) {
+                        i++; // Skip the response frame in the next iteration
+                    }
+
+                    const requestHex = formatModbusFrame(requestFrame);
+                    const requestBreakdown = getDetailedBreakdown(requestFrame);
+
+                    let responseHex = 'No response';
+                    let responseBreakdown = '';
+                    if (responseFrame) {
+                        responseHex = formatModbusFrame(responseFrame);
+                        responseBreakdown = getDetailedBreakdown(responseFrame);
+                    }
+
+                    outputDiv.innerHTML += `
+                        <div class="card">
+                            <div class="card-body">
+                                <div class="request">
+                                    <h5>Request Breakdown</h5>
+                                    <pre>${requestHex}</pre>
+                                    ${requestBreakdown}
+                                </div>
+                                <div class="response">
+                                    <h5>Response Breakdown</h5>
+                                    <pre>${responseHex}</pre>
+                                    ${responseBreakdown}
+                                </div>
+                            </div>
+                        </div>
+                    `;
+                }
+            }
+        }
+
+        function decodeModbus(binary, startIndex, expectingResponse) {
+            let currentIndex = startIndex;
+            const binaryLength = binary.length;
+
+            function readBytes(numBytes) {
+                const bitsNeeded = numBytes * 8;
+                if (currentIndex + bitsNeeded > binaryLength) {
+                    return null;
+                }
+                const bytes = [];
+                for (let i = 0; i < numBytes; i++) {
+                    const byteString = binary.substring(currentIndex, currentIndex + 8);
+                    bytes.push(parseInt(byteString, 2));
+                    currentIndex += 8;
+                }
+                return bytes;
+            }
+
+            // Read Address
+            const addressBytes = readBytes(1);
+            if (!addressBytes) return { error: 'Incomplete frame at address.', totalBits: binaryLength - startIndex };
+            const slaveAddress = addressBytes[0];
+
+            // Read Function Code
+            const functionCodeBytes = readBytes(1);
+            if (!functionCodeBytes) return { error: 'Incomplete frame at function code.', totalBits: binaryLength - startIndex };
+            const functionCode = functionCodeBytes[0];
+
+            let data = [];
+            let frameLength = 2; // Address + Function Code
+
+            if (functionCode === 0x03) { // Function Code 0x03
+                if (!expectingResponse) {
+                    // Request Frame
+                    const dataBytes = readBytes(4); // Starting Address (2 bytes) + Quantity (2 bytes)
+                    if (!dataBytes) return { error: 'Incomplete request frame data.', totalBits: binaryLength - startIndex };
+                    data = dataBytes;
+                    frameLength += 4;
+                } else {
+                    // Response Frame
+                    const byteCountBytes = readBytes(1);
+                    if (!byteCountBytes) return { error: 'Incomplete response frame byte count.', totalBits: binaryLength - startIndex };
+                    const byteCount = byteCountBytes[0];
+                    data.push(byteCount);
+                    frameLength += 1;
+
+                    const dataBytes = readBytes(byteCount);
+                    if (!dataBytes) return { error: 'Incomplete response frame data.', totalBits: binaryLength - startIndex };
+                    data = data.concat(dataBytes);
+                    frameLength += byteCount;
+                }
+            } else {
+                return { error: `Unsupported function code: ${functionCode}`, totalBits: binaryLength - startIndex };
+            }
+
+            // Read CRC
+            const crcBytes = readBytes(2);
+            if (!crcBytes) return { error: 'Incomplete frame at CRC.', totalBits: binaryLength - startIndex };
+            const receivedCrc = (crcBytes[1] << 8) | crcBytes[0];
+            frameLength += 2;
+
+            const allBytes = [slaveAddress, functionCode, ...data];
+            const calculatedCrc = calculateCrc(allBytes);
+
+            return {
+                slaveAddress,
+                functionCode,
+                data,
+                crc: receivedCrc,
+                calculatedCrc,
+                crcMatch: receivedCrc === calculatedCrc,
+                type: !expectingResponse ? 'request' : 'response',
+                totalBits: frameLength * 8
+            };
+        }
+
+        function calculateCrc(bytes) {
+            let crc = 0xFFFF;
+            for (const byte of bytes) {
+                crc ^= byte;
+                for (let i = 0; i < 8; i++) {
+                    if (crc & 0x0001) {
+                        crc = (crc >> 1) ^ 0xA001;
+                    } else {
+                        crc >>= 1;
+                    }
+                }
+            }
+            return crc;
+        }
+
+        function formatModbusFrame(frame) {
+            if (frame.error) {
+                return frame.error;
+            }
+
+            const allBytes = [frame.slaveAddress, frame.functionCode, ...frame.data];
+            const hexString = allBytes.map(byte => byte.toString(16).toUpperCase().padStart(2, '0')).join('');
+            const crcHex = frame.crc.toString(16).toUpperCase().padStart(4, '0');
+
+            return `${hexString}${crcHex}`;
+        }
+
+        function getDetailedBreakdown(frame) {
+            if (frame.error) {
+                return frame.error;
+            }
+
+            const slaveIDHex = frame.slaveAddress.toString(16).toUpperCase().padStart(2, '0');
+            const functionCodeHex = frame.functionCode.toString(16).toUpperCase().padStart(2, '0');
+            const crcHex = frame.crc.toString(16).toUpperCase().padStart(4, '0');
+            const calculatedCrcHex = frame.calculatedCrc.toString(16).toUpperCase().padStart(4, '0');
+            const crcMatch = frame.crcMatch ? 'True' : 'False';
+            const tableClass = frame.crcMatch ? 'table-success' : 'table-danger';
+
+            let dataDescription = '';
+            if (frame.type === 'request') {
+                const startingAddress = (frame.data[0] << 8) | frame.data[1];
+                const quantity = (frame.data[2] << 8) | frame.data[3];
+                dataDescription = `
+                    <tr>
+                        <td>0x${(frame.data[0].toString(16).toUpperCase().padStart(2, '0'))}${(frame.data[1].toString(16).toUpperCase().padStart(2, '0'))}</td>
+                        <td>Starting Address (Dec: ${startingAddress})</td>
+                    </tr>
+                    <tr>
+                        <td>0x${(frame.data[2].toString(16).toUpperCase().padStart(2, '0'))}${(frame.data[3].toString(16).toUpperCase().padStart(2, '0'))}</td>
+                        <td>Quantity of Registers (Dec: ${quantity})</td>
+                    </tr>
+                `;
+            } else if (frame.type === 'response') {
+                const byteCount = frame.data[0];
+                const registerValues = [];
+                for (let i = 1; i < frame.data.length; i += 2) {
+                    if (i + 1 < frame.data.length) {
+                        const highByte = frame.data[i];
+                        const lowByte = frame.data[i + 1];
+                        const hexValue = `${highByte.toString(16).toUpperCase().padStart(2, '0')}${lowByte.toString(16).toUpperCase().padStart(2, '0')}`;
+                        const intValue = (highByte << 8) | lowByte;
+                        const asciiValue = String.fromCharCode(highByte) + String.fromCharCode(lowByte);
+
+                        let floatValue = '';
+                        if ((i - 1) % 4 === 0 && i + 3 < frame.data.length) {
+                            // Combine two 16-bit registers to form a 32-bit float
+                            const bytes = frame.data.slice(i, i + 4);
+                            const buffer = new ArrayBuffer(4);
+                            const view = new DataView(buffer);
+                            bytes.forEach((b, idx) => view.setUint8(idx, b));
+                            floatValue = view.getFloat32(0, false); // big-endian
+                            floatValue = floatValue.toFixed(6);
+                        }
+
+                        registerValues.push({
+                            hex: `0x${hexValue}`,
+                            intValue,
+                            floatValue: floatValue || '',
+                            asciiValue
+                        });
+                    }
+                }
+
+                // Build the nested table
+                let nestedTableRows = '';
+                registerValues.forEach((reg, idx) => {
+                    nestedTableRows += `
+                        <tr>
+                            <td>${reg.hex}</td>
+                            <td>${reg.intValue}</td>
+                            <td>${reg.floatValue}</td>
+                            <td>${reg.asciiValue}</td>
+                        </tr>
+                    `;
+                });
+
+                const nestedTable = `
+                    <table class="nested-table table ${tableClass} table-bordered">
+                        <thead>
+                            <tr>
+                                <th>16-bit Hex</th>
+                                <th>16-bit Decimal</th>
+                                <th>32-bit Float</th>
+                                <th>ASCII</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            ${nestedTableRows}
+                        </tbody>
+                    </table>
+                    <button class="btn btn-secondary btn-sm mt-2" onclick="showAsciiModal(${JSON.stringify(registerValues).replace(/"/g, '&quot;')})">Show ASCII</button>
+                `;
+
+                dataDescription = `
+                    <tr>
+                        <td>0x${frame.data[0].toString(16).toUpperCase().padStart(2, '0')}</td>
+                        <td>Byte Count (Dec: ${byteCount})</td>
+                    </tr>
+                    <tr>
+                        <td colspan="2">
+                            ${nestedTable}
+                        </td>
+                    </tr>
+                `;
+            }
+
+            return `
+                <table class="table ${tableClass} table-bordered">
+                    <thead>
+                        <tr>
+                            <th>Hex Value</th>
+                            <th>Description</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td>0x${slaveIDHex}</td>
+                            <td>Address</td>
+                        </tr>
+                        <tr>
+                            <td>0x${functionCodeHex}</td>
+                            <td>Function Code: ${getFunctionDescription(frame.functionCode)}</td>
+                        </tr>
+                        ${dataDescription}
+                        <tr>
+                            <td>0x${crcHex}</td>
+                            <td>CRC (received)</td>
+                        </tr>
+                        <tr>
+                            <td>0x${calculatedCrcHex}</td>
+                            <td>CRC (calculated)</td>
+                        </tr>
+                        <tr>
+                            <td colspan="2">CRC Match: ${crcMatch}</td>
+                        </tr>
+                    </tbody>
+                </table>
+            `;
+        }
+
+        function getFunctionDescription(functionCode) {
+            const functionCodes = {
+                0x03: 'Read Holding Registers',
+                // Add other function codes as needed
+            };
+            return functionCodes[functionCode] || 'Unknown Function';
+        }
+
+        function showAsciiModal(registerValues) {
+            // Build the ASCII string
+            let asciiString = '';
+            registerValues.forEach(reg => {
+                asciiString += reg.asciiValue;
+            });
+
+            // Build the modal content
+            const modalContent = `
+                <div class="ascii-display">${asciiString}</div>
+            `;
+
+            document.getElementById('modalBodyContent').innerHTML = modalContent;
+            const modal = new bootstrap.Modal(document.getElementById('transposeModal'));
+            modal.show();
+        }
+    </script>
+</body>
+</html>
