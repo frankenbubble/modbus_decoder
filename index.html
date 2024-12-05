@@ -333,7 +333,8 @@
             // Read CRC
             const crcBytes = readBytes(2);
             if (!crcBytes) return { error: 'Incomplete frame at CRC.', totalBits: binaryLength - startIndex };
-            const receivedCrc = (crcBytes[1] << 8) | crcBytes[0];
+            const receivedCrcAsBigEndian = (crcBytes[1] << 8) | crcBytes[0];
+            const wireCrc = (crcBytes[0] << 8) | crcBytes[1];
             frameLength += 2;
 
             const allBytes = [slaveAddress, functionCode, ...data];
@@ -343,9 +344,10 @@
                 slaveAddress,
                 functionCode,
                 data,
-                crc: receivedCrc,
+                crc: receivedCrcAsBigEndian,
+                crcOnTheWire: wireCrc,
                 calculatedCrc,
-                crcMatch: receivedCrc === calculatedCrc,
+                crcMatch: receivedCrcAsBigEndian === calculatedCrc,
                 type: !expectingResponse ? 'request' : 'response',
                 totalBits: frameLength * 8
             };
@@ -373,7 +375,7 @@
 
             const allBytes = [frame.slaveAddress, frame.functionCode, ...frame.data];
             const hexString = allBytes.map(byte => byte.toString(16).toUpperCase().padStart(2, '0')).join('');
-            const crcHex = frame.crc.toString(16).toUpperCase().padStart(4, '0');
+            const crcHex = frame.crcOnTheWire.toString(16).toUpperCase().padStart(4, '0');
 
             return `${hexString}${crcHex}`;
         }
@@ -499,11 +501,11 @@
                         ${dataDescription}
                         <tr>
                             <td>0x${crcHex}</td>
-                            <td>CRC (received)</td>
+                            <td>CRC (received converted to Big Endian)</td>
                         </tr>
                         <tr>
                             <td>0x${calculatedCrcHex}</td>
-                            <td>CRC (calculated)</td>
+                            <td>CRC (calculated as Big Endian)</td>
                         </tr>
                         <tr>
                             <td colspan="2">CRC Match: ${crcMatch}</td>
